@@ -1,0 +1,72 @@
+"""Shared fixtures for AEMS Local Bridge Agent tests."""
+
+import pytest
+from pathlib import Path
+from typing import Generator
+
+from aems_agent.config import AgentConfig, save_config, ensure_auth_token
+
+
+@pytest.fixture
+def tmp_storage_path(tmp_path: Path) -> Path:
+    """Create a temporary storage directory."""
+    storage = tmp_path / "exams"
+    storage.mkdir()
+    return storage
+
+
+@pytest.fixture
+def agent_config(tmp_path: Path, tmp_storage_path: Path) -> AgentConfig:
+    """Create an agent config with temporary paths."""
+    config = AgentConfig(
+        storage_path=str(tmp_storage_path),
+        port=61234,
+        host="127.0.0.1",
+        allowed_origins=["http://127.0.0.1:8080"],
+    )
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    save_config(config, config_dir)
+    return config
+
+
+@pytest.fixture
+def agent_config_dir(tmp_path: Path, agent_config: AgentConfig) -> Path:
+    """Return the config directory path."""
+    config_dir = tmp_path / "config"
+    return config_dir
+
+
+@pytest.fixture
+def agent_token(agent_config_dir: Path) -> str:
+    """Ensure and return the auth token."""
+    return ensure_auth_token(agent_config_dir)
+
+
+@pytest.fixture
+def agent_client(agent_config_dir: Path, agent_token: str) -> Generator:
+    """Create a FastAPI TestClient for the agent."""
+    try:
+        from httpx import ASGITransport, AsyncClient
+        from fastapi.testclient import TestClient
+    except ImportError:
+        pytest.skip("httpx/fastapi not installed (install with: pip install aems-agent)")
+        return
+
+    from aems_agent.app import create_app
+
+    app = create_app(config_dir=agent_config_dir)
+    client = TestClient(app)
+    yield client
+
+
+@pytest.fixture
+def auth_headers(agent_token: str) -> dict:
+    """Return authorization headers with the agent token."""
+    return {"Authorization": f"Bearer {agent_token}"}
+
+
+@pytest.fixture
+def sample_pdf() -> bytes:
+    """Return minimal valid PDF bytes for testing."""
+    return b"%PDF-1.4 minimal test PDF content for AEMS agent testing"

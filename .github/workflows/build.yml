@@ -1,0 +1,142 @@
+name: Build AEMS Agent
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., 0.2.0)'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -e ".[dev]"
+
+      - name: Build with PyInstaller
+        run: python packaging/build.py --platform windows
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Build installer
+        run: |
+          makensis /DDIST_DIR=dist\aems-agent /DOUTPUT_DIR=dist packaging\windows\installer.nsi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aems-agent-windows
+          path: |
+            dist/aems-agent-setup.exe
+            dist/aems-agent/
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -e ".[dev]"
+
+      - name: Build with PyInstaller
+        run: python packaging/build.py --platform macos
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aems-agent-macos
+          path: |
+            dist/AEMS-Agent.dmg
+            dist/AEMS Agent.app/
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -e ".[dev]"
+
+      - name: Build with PyInstaller
+        run: python packaging/build.py --platform linux
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aems-agent-linux
+          path: dist/aems-agent/
+
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Collect release assets
+        id: assets
+        run: |
+          ASSETS=""
+          # Windows installer
+          if [ -f artifacts/aems-agent-windows/aems-agent-setup.exe ]; then
+            ASSETS="$ASSETS artifacts/aems-agent-windows/aems-agent-setup.exe"
+          fi
+          # macOS DMG
+          if [ -f artifacts/aems-agent-macos/AEMS-Agent.dmg ]; then
+            ASSETS="$ASSETS artifacts/aems-agent-macos/AEMS-Agent.dmg"
+          fi
+          # Linux — tar up the directory for a single downloadable artifact
+          # PyInstaller outputs dist/aems-agent/ with aems-agent (exe) + _internal/, not a subdir
+          if [ -d artifacts/aems-agent-linux ]; then
+            tar -czf artifacts/aems-agent-linux.tar.gz -C artifacts aems-agent-linux
+            ASSETS="$ASSETS artifacts/aems-agent-linux.tar.gz"
+          fi
+          ASSETS=$(echo "$ASSETS" | xargs)
+          echo "files=$ASSETS" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          gh release create "v${VERSION}" \
+            --title "AEMS Agent v${VERSION}" \
+            --notes "AEMS Local Bridge Agent v${VERSION} — Windows (.exe), macOS (.dmg), Linux (.tar.gz)" \
+            ${{ steps.assets.outputs.files }}
