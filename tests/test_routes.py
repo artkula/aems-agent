@@ -71,6 +71,8 @@ class TestHealthEndpoint:
         data = resp.json()
         assert "disk_total_bytes" in data
         assert "disk_free_bytes" in data
+        assert "license_policy_mode" in data
+        assert "license_limited_mode_active" in data
 
 
 class TestConfigPathEndpoints:
@@ -115,6 +117,19 @@ class TestConfigPathEndpoints:
             headers=auth_headers,
         )
         assert resp.status_code == 422  # Pydantic validation error
+
+    def test_set_path_blocked_in_soft_block(
+        self, agent_client: Any, auth_headers: dict, tmp_path: Path
+    ) -> None:
+        _skip_if_no_fastapi()
+        agent_client.app.state.license_controller._limited_mode_active = True
+        new_path = tmp_path / "blocked_storage"
+        resp = agent_client.put(
+            "/config/path",
+            json={"path": str(new_path)},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 403
 
 
 class TestFileOperations:
@@ -171,6 +186,21 @@ class TestFileOperations:
         )
         assert resp.status_code == 400
         assert "PDF" in resp.json()["detail"]
+
+    def test_store_blocked_in_soft_block(
+        self,
+        agent_client: Any,
+        auth_headers: dict,
+        sample_pdf: bytes,
+    ) -> None:
+        _skip_if_no_fastapi()
+        agent_client.app.state.license_controller._limited_mode_active = True
+        resp = agent_client.put(
+            "/files/123/456",
+            content=sample_pdf,
+            headers={**auth_headers, "Content-Type": "application/pdf"},
+        )
+        assert resp.status_code == 403
 
     def test_get_nonexistent_returns_404(self, agent_client: Any, auth_headers: dict) -> None:
         _skip_if_no_fastapi()

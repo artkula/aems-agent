@@ -1,6 +1,6 @@
 # AEMS Local Bridge Agent
 
-A lightweight companion service that runs on `localhost` and provides REST API access to the local filesystem, enabling the [AEMS](https://github.com/artkula/aems) web application to read/write exam PDFs to a user-chosen folder.
+A lightweight companion service that runs on `localhost` and provides REST API access to the local filesystem, enabling the [AEMS](https://github.com/artkula/aems) web app to read/write exam PDFs to a user-chosen folder.
 
 ## Installation
 
@@ -16,7 +16,7 @@ Download pre-built installers from [Releases](https://github.com/artkula/aems-ag
 
 | Platform | File | Notes |
 |----------|------|-------|
-| Windows | `aems-agent-setup.exe` | Installs to `%LOCALAPPDATA%\AEMS Agent`, adds Start Menu shortcut |
+| Windows | `aems-agent-setup.exe` | Installs to `%LOCALAPPDATA%\AEMS Agent` |
 | macOS | `AEMS-Agent.dmg` | Drag to Applications |
 | Linux | `aems-agent-linux.tar.gz` | Extract and run `./aems-agent run` |
 
@@ -32,14 +32,28 @@ aems-agent run --tray
 # Custom port/host
 aems-agent run --port 9000 --host 0.0.0.0
 
-# Show the auth token
+# Enforce runtime license policy
+aems-agent run --license-policy warn
+aems-agent run --license-policy soft-block
+aems-agent run --license-policy hard-block
+
+# Show auth token
 aems-agent token
 
-# Set the exam storage directory
+# Set exam storage directory
 aems-agent set-path /path/to/exams
 
 # Show config directory location
 aems-agent config-dir
+
+# Store a license JWT token
+aems-agent license-store "<jwt-token>"
+
+# Validate token signature + claims + heartbeat
+aems-agent license-check \
+  --license-url https://license.domain.com \
+  --issuer https://license.domain.com \
+  --audience aems-agent
 ```
 
 ## Configuration
@@ -53,9 +67,15 @@ Config files are stored in a platform-specific directory:
 | Linux | `~/.config/aems/agent/` (or `$XDG_CONFIG_HOME/aems/agent/`) |
 
 Files:
-- `config.json` — storage path, port, allowed origins
-- `auth_token` — bearer token for API authentication
-- `agent.log` — rotating log file
+- `config.json` - storage path, port, allowed origins, license settings
+- `auth_token` - bearer token for API authentication
+- `license.jwt` - stored license token
+- `agent.log` - rotating log file
+
+Runtime license policy modes:
+- `warn`: agent starts and logs validation failures.
+- `soft-block`: agent starts in limited mode when license is invalid. Write operations (`PUT/DELETE /files/*`, `PUT /config/path`) are blocked until license becomes valid again.
+- `hard-block`: startup fails and exits non-zero when license is invalid/revoked/grace-expired; runtime checks also terminate the process non-zero on hard-block failures.
 
 ## API Endpoints
 
@@ -75,8 +95,37 @@ Files:
 ```bash
 git clone https://github.com/artkula/aems-agent.git
 cd aems-agent
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 python -m pytest -v
+```
+
+## Release Trust and Verification
+
+Release pipeline:
+- `.github/workflows/build.yml`
+- Windows tagged releases are Authenticode-signed.
+- macOS tagged releases are code-signed, notarized, and stapled.
+- `release-manifest.json` and `sha256sums.txt` are signed with cosign as supplemental integrity proof.
+
+Verification examples:
+
+Windows:
+```powershell
+Get-AuthenticodeSignature .\aems-agent-setup.exe | Format-List
+```
+
+macOS:
+```bash
+codesign --verify --deep --strict --verbose=2 "AEMS Agent.app"
+spctl --assess --type open --context context:primary-signature --verbose=4 "AEMS-Agent.dmg"
+```
+
+Cosign manifest verification:
+```bash
+cosign verify-blob \
+  --certificate release-manifest.pem \
+  --signature release-manifest.sig \
+  release-manifest.json
 ```
 
 ## License
