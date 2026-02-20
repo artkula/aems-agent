@@ -3,27 +3,31 @@ name: Build AEMS Agent
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., 0.2.0)'
+        description: "Version tag (for manual runs)"
         required: false
-        default: 'dev'
+        default: "dev"
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      WIN_CODESIGN_CERT_PFX_BASE64: ${{ secrets.WIN_CODESIGN_CERT_PFX_BASE64 }}
+      WIN_CODESIGN_CERT_PASSWORD: ${{ secrets.WIN_CODESIGN_CERT_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -40,6 +44,25 @@ jobs:
         run: |
           makensis /DDIST_DIR=dist\aems-agent /DOUTPUT_DIR=dist packaging\windows\installer.nsi
 
+      - name: Require Windows signing credentials for tagged releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if (-not $env:WIN_CODESIGN_CERT_PFX_BASE64) {
+            throw "Missing secret WIN_CODESIGN_CERT_PFX_BASE64"
+          }
+          if (-not $env:WIN_CODESIGN_CERT_PASSWORD) {
+            throw "Missing secret WIN_CODESIGN_CERT_PASSWORD"
+          }
+
+      - name: Sign Windows installer (Authenticode)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WIN_CODESIGN_CERT_PFX_BASE64))
+          $signtool = (Get-Command signtool.exe).Source
+          & $signtool sign /fd SHA256 /f $pfxPath /p $env:WIN_CODESIGN_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 dist\aems-agent-setup.exe
+          & $signtool verify /pa /v dist\aems-agent-setup.exe
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -50,13 +73,20 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    env:
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_DEVELOPER_IDENTITY: ${{ secrets.MACOS_DEVELOPER_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -65,6 +95,58 @@ jobs:
 
       - name: Build with PyInstaller
         run: python packaging/build.py --platform macos
+
+      - name: Require macOS signing/notarization credentials for tagged releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          for v in MACOS_CERT_P12_BASE64 MACOS_CERT_PASSWORD MACOS_DEVELOPER_IDENTITY APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then
+              echo "Missing secret: $v" >&2
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/aems-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          CERT_PATH="$RUNNER_TEMP/developer_id.p12"
+          python - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          data = os.environ["MACOS_CERT_P12_BASE64"]
+          out = Path(os.environ["RUNNER_TEMP"]) / "developer_id.p12"
+          out.write_bytes(base64.b64decode(data))
+          PY
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Sign macOS app bundle and DMG
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          codesign --force --deep --options runtime --timestamp --sign "$MACOS_DEVELOPER_IDENTITY" "dist/AEMS Agent.app"
+          codesign --verify --deep --strict --verbose=2 "dist/AEMS Agent.app"
+          codesign --force --timestamp --sign "$MACOS_DEVELOPER_IDENTITY" "dist/AEMS-Agent.dmg"
+          codesign --verify --verbose=2 "dist/AEMS-Agent.dmg"
+
+      - name: Notarize and staple macOS DMG
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          xcrun notarytool submit "dist/AEMS-Agent.dmg" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "dist/AEMS-Agent.dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "dist/AEMS-Agent.dmg"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -82,7 +164,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -114,22 +196,52 @@ jobs:
         id: assets
         run: |
           ASSETS=""
-          # Windows installer
+
           if [ -f artifacts/aems-agent-windows/aems-agent-setup.exe ]; then
             ASSETS="$ASSETS artifacts/aems-agent-windows/aems-agent-setup.exe"
           fi
-          # macOS DMG
           if [ -f artifacts/aems-agent-macos/AEMS-Agent.dmg ]; then
             ASSETS="$ASSETS artifacts/aems-agent-macos/AEMS-Agent.dmg"
           fi
-          # Linux — tar up the directory for a single downloadable artifact
-          # PyInstaller outputs dist/aems-agent/ with aems-agent (exe) + _internal/, not a subdir
           if [ -d artifacts/aems-agent-linux ]; then
             tar -czf artifacts/aems-agent-linux.tar.gz -C artifacts aems-agent-linux
             ASSETS="$ASSETS artifacts/aems-agent-linux.tar.gz"
           fi
+
+          : > artifacts/sha256sums.txt
+          for f in $ASSETS; do
+            sha256sum "$f" >> artifacts/sha256sums.txt
+          done
+
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          cat > artifacts/release-manifest.json <<EOF
+          {
+            "name": "aems-agent",
+            "version": "${VERSION}",
+            "generated_at_utc": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "checksum_file": "sha256sums.txt"
+          }
+          EOF
+
+          ASSETS="$ASSETS artifacts/sha256sums.txt artifacts/release-manifest.json"
           ASSETS=$(echo "$ASSETS" | xargs)
           echo "files=$ASSETS" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign release manifest (keyless)
+        run: |
+          cosign sign-blob --yes artifacts/release-manifest.json \
+            --output-signature artifacts/release-manifest.sig \
+            --output-certificate artifacts/release-manifest.pem
+
+      - name: Append signature assets
+        id: signed_assets
+        run: |
+          FILES="${{ steps.assets.outputs.files }} artifacts/release-manifest.sig artifacts/release-manifest.pem"
+          FILES=$(echo "$FILES" | xargs)
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         env:
@@ -138,5 +250,5 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/v}"
           gh release create "v${VERSION}" \
             --title "AEMS Agent v${VERSION}" \
-            --notes "AEMS Local Bridge Agent v${VERSION} — Windows (.exe), macOS (.dmg), Linux (.tar.gz)" \
-            ${{ steps.assets.outputs.files }}
+            --notes "AEMS Local Bridge Agent v${VERSION} - Windows (.exe), macOS (.dmg), Linux (.tar.gz), plus signed manifest/checksums." \
+            ${{ steps.signed_assets.outputs.files }}
