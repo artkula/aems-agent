@@ -50,7 +50,6 @@ _auth_token: Optional[str] = None
 _pairing_challenge: Optional[Dict[str, Any]] = None
 _pairing_rate_limiter = RateLimiter(max_requests=3, window_seconds=60.0)
 
-
 def set_agent_globals(config_dir: Path, auth_token: str) -> None:
     """Set module-level globals used by route handlers."""
     global _config_dir, _auth_token
@@ -84,6 +83,18 @@ def _check_rate_limit(request: Request) -> None:
     client_ip = request.client.host if request.client else "unknown"
     if not _rate_limiter.is_allowed(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+
+def _enforce_license_write_capability(request: Request) -> None:
+    """Block write endpoints when soft-block mode is active."""
+    controller = getattr(request.app.state, "license_controller", None)
+    if controller is None:
+        return
+    if not controller.is_write_permitted(method=request.method, path=request.url.path):
+        raise HTTPException(
+            status_code=403,
+            detail="License soft-block active: write operations are disabled",
+        )
 
 
 def _get_storage_path() -> Path:
@@ -190,19 +201,29 @@ class FileInfo(BaseModel):
 
 
 @router.get("/status")
-async def status() -> Dict[str, Any]:
+async def status(request: Request) -> Dict[str, Any]:
     """Alive check - no authentication required."""
     config = _get_config()
-    return {
+    payload: Dict[str, Any] = {
         "status": "ok",
         "service": "aems-agent",
         "version": AGENT_VERSION,
         "storage_configured": config.storage_path is not None,
     }
+    controller = getattr(request.app.state, "license_controller", None)
+    if controller is not None:
+        snapshot = controller.snapshot()
+        payload["license_policy_mode"] = snapshot.policy_mode
+        payload["license_limited_mode_active"] = snapshot.limited_mode_active
+        payload["license_last_valid"] = snapshot.last_valid
+        payload["license_last_reason"] = snapshot.last_reason
+        payload["license_last_checked_at_utc"] = snapshot.last_checked_at_utc
+    return payload
 
 
 @router.get("/health")
 async def health(
+    request: Request,
     _token: str = Depends(_verify_token),
     _rl: None = Depends(_check_rate_limit),
 ) -> Dict[str, Any]:
@@ -229,6 +250,15 @@ async def health(
             except OSError:
                 pass
 
+    controller = getattr(request.app.state, "license_controller", None)
+    if controller is not None:
+        snapshot = controller.snapshot()
+        result["license_policy_mode"] = snapshot.policy_mode
+        result["license_limited_mode_active"] = snapshot.limited_mode_active
+        result["license_last_valid"] = snapshot.last_valid
+        result["license_last_reason"] = snapshot.last_reason
+        result["license_last_checked_at_utc"] = snapshot.last_checked_at_utc
+
     return result
 
 
@@ -247,6 +277,7 @@ async def set_path(
     body: SetPathRequest,
     _token: str = Depends(_verify_token),
     _rl: None = Depends(_check_rate_limit),
+    _license: None = Depends(_enforce_license_write_capability),
 ) -> Dict[str, Any]:
     """Set the storage path (validates the directory is writable)."""
     path = Path(body.path)
@@ -334,6 +365,7 @@ async def store_submission(
     x_sha256: Optional[str] = Header(default=None),
     _token: str = Depends(_verify_token),
     _rl: None = Depends(_check_rate_limit),
+    _license: None = Depends(_enforce_license_write_capability),
 ) -> Dict[str, Any]:
     """Store a submission PDF with atomic write."""
     storage_path = _get_storage_path()
@@ -393,6 +425,7 @@ async def delete_submission(
     submission_id: str,
     _token: str = Depends(_verify_token),
     _rl: None = Depends(_check_rate_limit),
+    _license: None = Depends(_enforce_license_write_capability),
 ) -> Dict[str, Any]:
     """Delete a submission directory and all its files."""
     storage_path = _get_storage_path()
@@ -445,6 +478,7 @@ async def store_annotated(
     x_sha256: Optional[str] = Header(default=None),
     _token: str = Depends(_verify_token),
     _rl: None = Depends(_check_rate_limit),
+    _license: None = Depends(_enforce_license_write_capability),
 ) -> Dict[str, Any]:
     """Store an annotated submission PDF with atomic write."""
     storage_path = _get_storage_path()
