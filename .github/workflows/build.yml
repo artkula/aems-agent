@@ -44,18 +44,19 @@ jobs:
         run: |
           makensis /DDIST_DIR=dist\aems-agent /DOUTPUT_DIR=dist packaging\windows\installer.nsi
 
-      - name: Require Windows signing credentials for tagged releases
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Check Windows signing credentials
+        id: win_sign_check
         run: |
-          if (-not $env:WIN_CODESIGN_CERT_PFX_BASE64) {
-            throw "Missing secret WIN_CODESIGN_CERT_PFX_BASE64"
-          }
-          if (-not $env:WIN_CODESIGN_CERT_PASSWORD) {
-            throw "Missing secret WIN_CODESIGN_CERT_PASSWORD"
+          if ($env:WIN_CODESIGN_CERT_PFX_BASE64 -and $env:WIN_CODESIGN_CERT_PASSWORD) {
+            echo "available=true" >> $env:GITHUB_OUTPUT
+            Write-Host "Code signing credentials found, will sign installer."
+          } else {
+            echo "available=false" >> $env:GITHUB_OUTPUT
+            Write-Host "::warning::Code signing credentials not configured. Installer will be unsigned."
           }
 
       - name: Sign Windows installer (Authenticode)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.win_sign_check.outputs.available == 'true'
         run: |
           $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WIN_CODESIGN_CERT_PFX_BASE64))
@@ -96,18 +97,25 @@ jobs:
       - name: Build with PyInstaller
         run: python packaging/build.py --platform macos
 
-      - name: Require macOS signing/notarization credentials for tagged releases
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Check macOS signing credentials
+        id: mac_sign_check
         run: |
+          ALL_PRESENT=true
           for v in MACOS_CERT_P12_BASE64 MACOS_CERT_PASSWORD MACOS_DEVELOPER_IDENTITY APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!v}" ]; then
-              echo "Missing secret: $v" >&2
-              exit 1
+              ALL_PRESENT=false
+              break
             fi
           done
+          echo "available=$ALL_PRESENT" >> "$GITHUB_OUTPUT"
+          if [ "$ALL_PRESENT" = "false" ]; then
+            echo "::warning::macOS signing/notarization credentials not configured. DMG will be unsigned."
+          else
+            echo "Signing credentials found, will sign and notarize."
+          fi
 
       - name: Import Developer ID certificate
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.mac_sign_check.outputs.available == 'true'
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/aems-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
@@ -130,7 +138,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
       - name: Sign macOS app bundle and DMG
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.mac_sign_check.outputs.available == 'true'
         run: |
           codesign --force --deep --options runtime --timestamp --sign "$MACOS_DEVELOPER_IDENTITY" "dist/AEMS Agent.app"
           codesign --verify --deep --strict --verbose=2 "dist/AEMS Agent.app"
@@ -138,7 +146,7 @@ jobs:
           codesign --verify --verbose=2 "dist/AEMS-Agent.dmg"
 
       - name: Notarize and staple macOS DMG
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.mac_sign_check.outputs.available == 'true'
         run: |
           xcrun notarytool submit "dist/AEMS-Agent.dmg" \
             --apple-id "$APPLE_ID" \
