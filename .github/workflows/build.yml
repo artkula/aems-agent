@@ -37,8 +37,21 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y
 
+      - name: Add NSIS to PATH
+        run: echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
+
       - name: Build with PyInstaller and NSIS installer
         run: python packaging/build.py --platform windows
+
+      - name: Verify installer exists
+        run: |
+          if (Test-Path "dist\aems-agent-setup.exe") {
+            Write-Host "Installer built: dist\aems-agent-setup.exe"
+            (Get-Item "dist\aems-agent-setup.exe").Length
+          } else {
+            Write-Host "::warning::Installer not found. Running NSIS directly..."
+            & "C:\Program Files (x86)\NSIS\makensis.exe" /DDIST_DIR=dist\aems-agent /DOUTPUT_DIR=dist packaging\windows\installer.nsi
+          }
 
       - name: Check Windows signing credentials
         id: win_sign_check
