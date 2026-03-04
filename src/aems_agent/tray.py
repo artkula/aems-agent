@@ -12,12 +12,12 @@ import logging
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def _create_icon_image(color: str = "green") -> "PIL.Image.Image":
+def _create_icon_image(color: str = "green") -> Any:
     """Create a simple colored circle icon."""
     from PIL import Image, ImageDraw
 
@@ -80,7 +80,7 @@ def _open_folder_picker(config_dir: Path) -> None:
         logger.error("Folder picker failed: %s", e)
 
 
-def create_tray(config_dir: Path) -> "pystray.Icon":
+def create_tray(config_dir: Path) -> Any:
     """
     Create and return a pystray Icon instance.
 
@@ -98,20 +98,20 @@ def create_tray(config_dir: Path) -> "pystray.Icon":
     icon_color = "green" if config.storage_path else "yellow"
     image = _create_icon_image(icon_color)
 
-    def on_open_settings(icon: "pystray.Icon", item: "pystray.MenuItem") -> None:
+    def on_open_settings(icon: Any, item: Any) -> None:
         cfg = load_config(config_dir)
-        url = f"http://{cfg.host}:{cfg.port}/status"
-        # Open the AEMS web settings page instead
-        webbrowser.open("http://127.0.0.1:8080/settings#privacy")
+        # Build URL from config; default AEMS web on same host, port 8080
+        aems_host = cfg.host if cfg.host != "0.0.0.0" else "127.0.0.1"
+        webbrowser.open(f"http://{aems_host}:8080/settings#privacy")
 
-    def on_set_folder(icon: "pystray.Icon", item: "pystray.MenuItem") -> None:
+    def on_set_folder(icon: Any, item: Any) -> None:
         _open_folder_picker(config_dir)
         # Update icon color based on new config
         cfg = load_config(config_dir)
         new_color = "green" if cfg.storage_path else "yellow"
         icon.icon = _create_icon_image(new_color)
 
-    def on_show_token(icon: "pystray.Icon", item: "pystray.MenuItem") -> None:
+    def on_show_token(icon: Any, item: Any) -> None:
         token = get_auth_token(config_dir)
         if token:
             # Copy to clipboard if possible
@@ -126,9 +126,12 @@ def create_tray(config_dir: Path) -> "pystray.Icon":
                 root.destroy()
                 logger.info("Token copied to clipboard")
             except Exception:
-                logger.info("Auth token: %s", token)
+                logger.warning(
+                    "Could not copy token to clipboard. Find it in: %s",
+                    config_dir / "auth_token",
+                )
 
-    def on_quit(icon: "pystray.Icon", item: "pystray.MenuItem") -> None:
+    def on_quit(icon: Any, item: Any) -> None:
         icon.stop()
 
     menu = pystray.Menu(
@@ -145,6 +148,15 @@ def create_tray(config_dir: Path) -> "pystray.Icon":
         title="AEMS Local Bridge Agent",
         menu=menu,
     )
+
+    def _notify_pairing_pin(pin: str) -> None:
+        """Show a tray notification with the pairing PIN."""
+        try:
+            icon.notify(f"Pairing PIN: {pin}", "AEMS Agent Pairing")
+        except Exception as e:
+            logger.debug("Tray PIN notification failed: %s", e)
+
+    icon._aems_pin_notifier = _notify_pairing_pin  # type: ignore[attr-defined]
 
     return icon
 

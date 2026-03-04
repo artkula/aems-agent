@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -201,3 +203,70 @@ async def test_validate_license_token_heartbeat_server_error_grace_expired(
     assert result.valid is False
     assert result.reason == "heartbeat_unreachable_grace_expired"
     assert result.heartbeat_checked is True
+
+
+class _FakeAsyncClientFetchFails:
+    """AsyncClient that always raises on get (simulates network failure)."""
+
+    def __init__(self) -> None:
+        pass
+
+    async def __aenter__(self) -> "_FakeAsyncClientFetchFails":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    async def get(self, url: str) -> _FakeResponse:
+        raise RuntimeError("network down")
+
+
+@pytest.mark.asyncio
+async def test_jwks_cache_fallback_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JWKS fetch fails but cached JWKS file exists → validation proceeds."""
+    token, jwks = _make_token_and_jwks(refresh_after_offset_seconds=3600)
+    # Pre-populate cache
+    cache_file = tmp_path / "jwks.json"
+    cache_file.write_text(json.dumps(jwks), encoding="utf-8")
+
+    monkeypatch.setattr(
+        module.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeAsyncClientFetchFails(),
+    )
+
+    result = await module.validate_license_token(
+        token=token,
+        license_service_url="https://license.example.com",
+        issuer="https://license.example.com",
+        audience="aems-agent",
+        jwks_cache_dir=tmp_path,
+    )
+    assert result.valid is True
+    assert result.reason == "valid_offline"
+
+
+@pytest.mark.asyncio
+async def test_jwks_fetch_failure_no_cache_returns_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JWKS fetch fails and no cache → valid=False."""
+    token, _jwks = _make_token_and_jwks(refresh_after_offset_seconds=3600)
+
+    monkeypatch.setattr(
+        module.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeAsyncClientFetchFails(),
+    )
+
+    result = await module.validate_license_token(
+        token=token,
+        license_service_url="https://license.example.com",
+        issuer="https://license.example.com",
+        audience="aems-agent",
+        jwks_cache_dir=tmp_path,
+    )
+    assert result.valid is False
+    assert result.reason == "jwks_fetch_failed"

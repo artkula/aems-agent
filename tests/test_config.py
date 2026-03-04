@@ -34,6 +34,53 @@ class TestGetConfigDir:
             assert ".config" in str(result) or "aems" in str(result)
 
 
+class TestGetConfigDirCrossPlatform:
+    """Tests for get_config_dir() cross-platform behavior."""
+
+    def test_darwin_uses_library(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = get_config_dir()
+        assert "Library" in str(result)
+        assert "Application Support" in str(result)
+        assert "AEMS" in str(result)
+
+    def test_linux_default(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        result = get_config_dir()
+        assert ".config" in str(result)
+        assert "aems" in str(result)
+
+    def test_linux_xdg_override(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        custom_xdg = str(tmp_path / "custom_xdg")
+        monkeypatch.setenv("XDG_CONFIG_HOME", custom_xdg)
+        result = get_config_dir()
+        assert custom_xdg in str(result)
+
+    def test_windows(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("platform.system", lambda: "Windows")
+        appdata = str(tmp_path / "AppData")
+        monkeypatch.setenv("APPDATA", appdata)
+        result = get_config_dir()
+        assert appdata in str(result)
+        assert "AEMS" in str(result)
+
+    def test_darwin_migration(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        # Create old config dir with a file
+        old_path = tmp_path / ".config" / "aems" / "agent"
+        old_path.mkdir(parents=True)
+        (old_path / "config.json").write_text("{}", encoding="utf-8")
+        result = get_config_dir()
+        new_path = tmp_path / "Library" / "Application Support" / "AEMS" / "agent"
+        assert result == new_path
+        assert (new_path / "config.json").exists()
+
+
 class TestAgentConfig:
     """Tests for AgentConfig model."""
 

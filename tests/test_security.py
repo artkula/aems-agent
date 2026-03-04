@@ -70,3 +70,23 @@ class TestRateLimiter:
         assert limiter.is_allowed("user1") is False
         limiter.reset()
         assert limiter.is_allowed("user1") is True
+
+    def test_window_expiry_allows_again(self) -> None:
+        import time
+
+        limiter = RateLimiter(max_requests=1, window_seconds=0.2)
+        assert limiter.is_allowed("user1") is True
+        assert limiter.is_allowed("user1") is False
+        time.sleep(0.3)
+        assert limiter.is_allowed("user1") is True
+
+    def test_max_keys_eviction(self) -> None:
+        limiter = RateLimiter(max_requests=10, window_seconds=60.0, max_keys=3)
+        # Fill up 3 keys
+        assert limiter.is_allowed("a") is True
+        assert limiter.is_allowed("b") is True
+        assert limiter.is_allowed("c") is True
+        # Adding a 4th should evict the oldest
+        assert limiter.is_allowed("d") is True
+        # Should still have 3 keys tracked (one evicted)
+        assert len(limiter._tracker) == 3

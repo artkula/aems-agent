@@ -10,16 +10,19 @@ Commands:
     aems-agent license-check                                     - Validate token + heartbeat
 """
 
+import os
 import signal
 import sys
 import json
 import asyncio
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
+from fastapi import FastAPI
 
 from .config import (
+    AGENT_VERSION,
     AgentConfig,
     ensure_auth_token,
     get_auth_token,
@@ -100,7 +103,7 @@ def run(
     config = AgentConfig(**config_values)
     save_config(config, config_dir)
 
-    token = ensure_auth_token(config_dir)
+    ensure_auth_token(config_dir)
 
     controller = LicenseEnforcementController(
         config_dir=config_dir,
@@ -112,31 +115,42 @@ def run(
         typer.echo(f"License hard-block: {exc}", err=True)
         raise typer.Exit(2)
 
-    typer.echo("AEMS Local Bridge Agent v0.2.0")
+    typer.echo(f"AEMS Local Bridge Agent v{AGENT_VERSION}")
     typer.echo(f"  Config dir:   {config_dir}")
     typer.echo(f"  Storage path: {config.storage_path or '(not configured)'}")
     typer.echo(f"  Listening on: http://{host}:{port}")
-    typer.echo(f"  Auth token:   {token}")
+    typer.echo(f"  Token file:   {config_dir / 'auth_token'}")
     typer.echo(f"  License mode: {config.license_enforcement_mode}")
     typer.echo(f"  License check interval: {config.license_check_interval_seconds}s")
     typer.echo("")
 
-    # Start system tray in a separate thread if requested
-    if tray:
-        _start_tray(config_dir)
-
     from .app import create_app
 
     agent_app = create_app(config_dir, skip_startup_license_check=True)
+
+    # Start system tray in a separate thread if requested
+    if tray:
+        _start_tray(config_dir, agent_app)
+
     uvicorn.run(agent_app, host=host, port=port, log_level="info")
 
 
-def _start_tray(config_dir: Path) -> None:
+def _start_tray(config_dir: Path, agent_app: Optional[FastAPI] = None) -> None:
     """Start the system tray icon in a background thread."""
     try:
-        from .tray import start_tray_thread
+        from .tray import create_tray
 
-        start_tray_thread(config_dir)
+        import threading
+
+        icon: Any = create_tray(config_dir)
+
+        # Wire PIN notifier into FastAPI app state if available
+        notifier = getattr(icon, "_aems_pin_notifier", None)
+        if notifier is not None and agent_app is not None:
+            agent_app.state.tray_notifier = notifier
+
+        thread = threading.Thread(target=icon.run, daemon=True, name="aems-tray")
+        thread.start()
         typer.echo("  System tray: enabled")
     except ImportError:
         typer.echo(
@@ -199,11 +213,25 @@ def config_dir() -> None:
 
 @app.command("license-store")
 def license_store(
-    token: str = typer.Argument(..., help="License JWT token"),
+    token: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "License JWT token. Prefer passing via AEMS_LICENSE_TOKEN environment variable "
+            "to avoid exposing the token in process listings."
+        ),
+    ),
 ) -> None:
     """Store a license JWT in the agent config directory."""
+    resolved_token = token or os.environ.get("AEMS_LICENSE_TOKEN")
+    if not resolved_token:
+        typer.echo(
+            "Error: No license token provided. Pass it as an argument or set "
+            "the AEMS_LICENSE_TOKEN environment variable.",
+            err=True,
+        )
+        raise typer.Exit(1)
     config_dir_path = get_config_dir()
-    token_path = save_license_token(token, config_dir_path)
+    token_path = save_license_token(resolved_token, config_dir_path)
     typer.echo(f"License token saved: {token_path}")
 
 

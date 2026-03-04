@@ -99,8 +99,16 @@ def build_macos_dmg(dist_path: Path) -> Path:
         else:
             shutil.copy2(str(item), str(dest))
 
+    # Read version from pyproject.toml
+    import tomllib
+
+    pyproject_path = PROJECT_ROOT / "pyproject.toml"
+    with open(pyproject_path, "rb") as f:
+        pyproject_data = tomllib.load(f)
+    pkg_version = pyproject_data.get("project", {}).get("version", "0.0.0")
+
     # Write Info.plist
-    plist_content = """<?xml version="1.0" encoding="UTF-8"?>
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -108,8 +116,8 @@ def build_macos_dmg(dist_path: Path) -> Path:
     <key>CFBundleName</key><string>AEMS Agent</string>
     <key>CFBundleDisplayName</key><string>AEMS Agent</string>
     <key>CFBundleIdentifier</key><string>com.aems.agent</string>
-    <key>CFBundleVersion</key><string>0.2.0</string>
-    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleVersion</key><string>{pkg_version}</string>
+    <key>CFBundleShortVersionString</key><string>{pkg_version}</string>
     <key>CFBundleExecutable</key><string>aems-agent</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSBackgroundOnly</key><true/>
@@ -131,8 +139,8 @@ def build_macos_dmg(dist_path: Path) -> Path:
         ])
         print(f"  macOS DMG: {dmg_path}")
 
-    # Write LaunchAgent plist
-    launch_agent = PACKAGING_DIR / "macos" / "com.aems.agent.plist"
+    # Write LaunchAgent plist to dist (not source tree)
+    launch_agent = DIST_DIR / "com.aems.agent.plist"
     launch_agent.parent.mkdir(parents=True, exist_ok=True)
     launch_agent.write_text("""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"

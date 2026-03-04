@@ -14,13 +14,17 @@ Endpoint summary:
     PUT  /files/{assignment_id}/{submission_id}/annotated - Store annotated (auth)
 """
 
+import asyncio
 import hashlib
 import logging
 import os
+import random
+import re
 import secrets
 import shutil
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -29,7 +33,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
-from .config import AGENT_VERSION, AgentConfig, load_config, save_config
+from .config import AGENT_VERSION, API_VERSION, MIN_CLIENT_API_VERSION, AgentConfig, load_config, save_config
 from .security import RateLimiter, validate_path_within_storage
 
 logger = logging.getLogger(__name__)
@@ -48,6 +52,7 @@ _auth_token: Optional[str] = None
 
 # Pairing state (in-memory, single active challenge)
 _pairing_challenge: Optional[Dict[str, Any]] = None
+_pairing_lock = asyncio.Lock()
 _pairing_rate_limiter = RateLimiter(max_requests=3, window_seconds=60.0)
 
 def set_agent_globals(config_dir: Path, auth_token: str) -> None:
@@ -112,8 +117,6 @@ def _get_storage_path() -> Path:
 
 def _validate_path_segment(value: str, name: str) -> str:
     """Validate a path segment contains only safe characters."""
-    import re
-
     if not value or not re.match(r"^[a-zA-Z0-9_\-]+$", value):
         raise HTTPException(
             status_code=400,
@@ -201,24 +204,17 @@ class FileInfo(BaseModel):
 
 
 @router.get("/status")
-async def status(request: Request) -> Dict[str, Any]:
-    """Alive check - no authentication required."""
+async def status() -> Dict[str, Any]:
+    """Alive check - no authentication required. Minimal info only."""
     config = _get_config()
-    payload: Dict[str, Any] = {
+    return {
         "status": "ok",
         "service": "aems-agent",
         "version": AGENT_VERSION,
-        "storage_configured": config.storage_path is not None,
+        "api_version": API_VERSION,
+        "min_client_version": MIN_CLIENT_API_VERSION,
+        "storage_configured": bool(config.storage_path),
     }
-    controller = getattr(request.app.state, "license_controller", None)
-    if controller is not None:
-        snapshot = controller.snapshot()
-        payload["license_policy_mode"] = snapshot.policy_mode
-        payload["license_limited_mode_active"] = snapshot.limited_mode_active
-        payload["license_last_valid"] = snapshot.last_valid
-        payload["license_last_reason"] = snapshot.last_reason
-        payload["license_last_checked_at_utc"] = snapshot.last_checked_at_utc
-    return payload
 
 
 @router.get("/health")
@@ -316,17 +312,21 @@ async def list_submissions(
     submissions: List[Dict[str, Any]] = []
     if assignment_dir.exists() and assignment_dir.is_dir():
         for entry in sorted(assignment_dir.iterdir()):
-            if entry.is_dir():
-                sub_pdf = entry / "submission.pdf"
-                ann_pdf = entry / "submission_annotated.pdf"
-                info = FileInfo(
-                    submission_id=entry.name,
-                    has_submission=sub_pdf.exists(),
-                    has_annotated=ann_pdf.exists(),
-                    submission_size=sub_pdf.stat().st_size if sub_pdf.exists() else None,
-                    annotated_size=ann_pdf.stat().st_size if ann_pdf.exists() else None,
-                )
-                submissions.append(info.model_dump())
+            if not entry.is_dir():
+                continue
+            # Skip entries with invalid names (e.g., unexpected chars on disk)
+            if not re.match(r"^[a-zA-Z0-9_\-]+$", entry.name):
+                continue
+            sub_pdf = entry / "submission.pdf"
+            ann_pdf = entry / "submission_annotated.pdf"
+            info = FileInfo(
+                submission_id=entry.name,
+                has_submission=sub_pdf.exists(),
+                has_annotated=ann_pdf.exists(),
+                submission_size=sub_pdf.stat().st_size if sub_pdf.exists() else None,
+                annotated_size=ann_pdf.stat().st_size if ann_pdf.exists() else None,
+            )
+            submissions.append(info.model_dump())
 
     return {"assignment_id": assignment_id, "submissions": submissions}
 
@@ -387,11 +387,11 @@ async def store_submission(
 
     # Verify SHA-256 if provided
     actual_sha256 = _compute_sha256(data)
-    if x_sha256 and x_sha256.lower() != actual_sha256:
-        raise HTTPException(
-            status_code=400,
-            detail=f"SHA-256 mismatch: expected {x_sha256}, got {actual_sha256}",
-        )
+    if x_sha256:
+        if not re.match(r"^[a-fA-F0-9]{64}$", x_sha256):
+            raise HTTPException(status_code=400, detail="Invalid X-SHA256 format")
+        if x_sha256.lower() != actual_sha256:
+            raise HTTPException(status_code=400, detail="SHA-256 mismatch")
 
     # Atomic write: temp file then os.replace
     sub_dir.mkdir(parents=True, exist_ok=True)
@@ -406,7 +406,7 @@ async def store_submission(
     except Exception:
         if fd >= 0:
             os.close(fd)
-        if os.path.exists(tmp_path):
+        with suppress(OSError):
             os.unlink(tmp_path)
         raise
 
@@ -498,11 +498,11 @@ async def store_annotated(
         raise HTTPException(status_code=400, detail="Not a valid PDF")
 
     actual_sha256 = _compute_sha256(data)
-    if x_sha256 and x_sha256.lower() != actual_sha256:
-        raise HTTPException(
-            status_code=400,
-            detail=f"SHA-256 mismatch: expected {x_sha256}, got {actual_sha256}",
-        )
+    if x_sha256:
+        if not re.match(r"^[a-fA-F0-9]{64}$", x_sha256):
+            raise HTTPException(status_code=400, detail="Invalid X-SHA256 format")
+        if x_sha256.lower() != actual_sha256:
+            raise HTTPException(status_code=400, detail="SHA-256 mismatch")
 
     sub_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = sub_dir / "submission_annotated.pdf"
@@ -516,7 +516,7 @@ async def store_annotated(
     except Exception:
         if fd >= 0:
             os.close(fd)
-        if os.path.exists(tmp_path):
+        with suppress(OSError):
             os.unlink(tmp_path)
         raise
 
@@ -545,6 +545,7 @@ class PairCompleteRequest(BaseModel):
 
     challenge_id: str = Field(..., description="Challenge ID from initiate step")
     origin: str = Field(..., description="Browser origin requesting pairing")
+    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
 @router.post("/pair/initiate")
@@ -575,19 +576,33 @@ async def pair_initiate(
 
     config = _get_config()
     challenge_id = secrets.token_urlsafe(32)
+    pin = f"{random.SystemRandom().randint(0, 999999):06d}"
 
-    _pairing_challenge = {
-        "challenge_id": challenge_id,
-        "origin": origin_header,
-        "created_at": time.time(),
-        "expires_at": time.time() + 120,
-    }
+    async with _pairing_lock:
+        _pairing_challenge = {
+            "challenge_id": challenge_id,
+            "origin": origin_header,
+            "pin": pin,
+            "created_at": time.time(),
+            "expires_at": time.time() + 120,
+        }
+
+    # Print PIN to console for operator confirmation
+    logger.debug("Pairing PIN generated (origin: %s)", origin_header)
+    print(f"\n{'=' * 40}")
+    print(f"  PAIRING PIN: {pin}")
+    print(f"  Origin: {origin_header}")
+    print(f"{'=' * 40}\n")
+
+    # Tray notification if available
+    _notify_pairing_pin(request, pin)
 
     return {
         "challenge_id": challenge_id,
         "agent_name": f"AEMS Agent ({config.host}:{config.port})",
         "storage_path": config.storage_path,
         "expires_in": 120,
+        "requires_pin": True,
     }
 
 
@@ -609,45 +624,92 @@ async def pair_complete(
     if not _pairing_rate_limiter.is_allowed(client_ip):
         raise HTTPException(status_code=429, detail="Too many pairing attempts")
 
-    if not _pairing_challenge:
-        raise HTTPException(status_code=400, detail="No active pairing challenge")
-
     origin_header = _normalize_origin(request.headers.get("origin"))
     origin_body = _normalize_origin(body.origin)
     if not origin_header or not origin_body:
-        _pairing_challenge = None
+        async with _pairing_lock:
+            _pairing_challenge = None
         raise HTTPException(status_code=400, detail="Invalid origin")
     if not secrets.compare_digest(origin_header, origin_body):
-        _pairing_challenge = None
+        async with _pairing_lock:
+            _pairing_challenge = None
         raise HTTPException(status_code=403, detail="Origin header mismatch")
 
-    # Check expiry
-    if time.time() > _pairing_challenge["expires_at"]:
+    async with _pairing_lock:
+        if not _pairing_challenge:
+            raise HTTPException(status_code=400, detail="No active pairing challenge")
+
+        # Check expiry
+        if time.time() > _pairing_challenge["expires_at"]:
+            _pairing_challenge = None
+            raise HTTPException(status_code=410, detail="Pairing challenge expired")
+
+        # Validate challenge ID (constant-time comparison)
+        if not secrets.compare_digest(body.challenge_id, _pairing_challenge["challenge_id"]):
+            _pairing_challenge = None
+            raise HTTPException(status_code=403, detail="Invalid challenge ID")
+
+        # Bind completion to the same browser origin that initiated pairing.
+        expected_origin = str(_pairing_challenge.get("origin") or "")
+        if not secrets.compare_digest(origin_header, expected_origin):
+            _pairing_challenge = None
+            raise HTTPException(status_code=403, detail="Origin mismatch for pairing challenge")
+
+        # Validate PIN (constant-time comparison)
+        if not secrets.compare_digest(body.pin, _pairing_challenge["pin"]):
+            _pairing_challenge = None
+            raise HTTPException(status_code=403, detail="Invalid PIN")
+
+        # Consume the challenge (single-use)
         _pairing_challenge = None
-        raise HTTPException(status_code=410, detail="Pairing challenge expired")
 
-    # Validate challenge ID (constant-time comparison)
-    if not secrets.compare_digest(body.challenge_id, _pairing_challenge["challenge_id"]):
-        _pairing_challenge = None
-        raise HTTPException(status_code=403, detail="Invalid challenge ID")
-
-    # Bind completion to the same browser origin that initiated pairing.
-    expected_origin = str(_pairing_challenge.get("origin") or "")
-    if not secrets.compare_digest(origin_header, expected_origin):
-        _pairing_challenge = None
-        raise HTTPException(status_code=403, detail="Origin mismatch for pairing challenge")
-
-    # Consume the challenge (single-use)
-    _pairing_challenge = None
-
-    # Add origin to paired_origins and CORS
+    # Add origin to paired_origins, persist, and update live CORS list
     config = _get_config()
     if origin_header not in config.paired_origins:
         config.paired_origins.append(origin_header)
         save_config(config, _config_dir)
+    cors_origins: list[str] | None = getattr(request.app.state, "cors_origins", None)
+    if cors_origins is not None and origin_header not in cors_origins:
+        cors_origins.append(origin_header)
 
     # Return the auth token
     return {
         "token": _auth_token,
         "message": "Pairing successful",
     }
+
+
+@router.get("/pair/confirm")
+async def pair_confirm() -> Dict[str, Any]:
+    """
+    Check pairing status — returns active challenge info (PIN + origin).
+
+    No auth required (localhost-only service). Used by tray/UI to display
+    the PIN for operator confirmation.
+
+    Note: no _pairing_lock needed — asyncio single-threaded event loop
+    provides atomicity between await points, and this handler has none.
+    """
+    if not _pairing_challenge:
+        return {"active": False}
+
+    now = time.time()
+    if now > _pairing_challenge["expires_at"]:
+        return {"active": False}
+
+    return {
+        "active": True,
+        "pin": _pairing_challenge["pin"],
+        "origin": _pairing_challenge.get("origin", ""),
+        "expires_in": int(_pairing_challenge["expires_at"] - now),
+    }
+
+
+def _notify_pairing_pin(request: Request, pin: str) -> None:
+    """Send tray notification with pairing PIN if tray notifier is available."""
+    notifier = getattr(request.app.state, "tray_notifier", None)
+    if notifier is not None:
+        try:
+            notifier(pin)
+        except Exception as e:
+            logger.debug("Tray notification failed: %s", e)

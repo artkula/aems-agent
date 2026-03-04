@@ -108,9 +108,13 @@ class LicenseEnforcementController:
         self._hard_block_exit_code = hard_block_exit_code
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
-        self._last_result: LicenseValidationResult | None = None
-        self._last_checked_at: datetime | None = None
-        self._limited_mode_active = False
+        self._snapshot = LicenseRuntimeSnapshot(
+            policy_mode=config.license_enforcement_mode,
+            limited_mode_active=False,
+            last_valid=None,
+            last_reason="",
+            last_checked_at_utc=None,
+        )
 
     @property
     def policy_mode(self) -> str:
@@ -156,22 +160,21 @@ class LicenseEnforcementController:
 
     def snapshot(self) -> LicenseRuntimeSnapshot:
         """Return immutable snapshot of current enforcement state."""
-        last_checked = (
-            self._last_checked_at.astimezone(timezone.utc).isoformat()
-            if self._last_checked_at is not None
-            else None
-        )
-        return LicenseRuntimeSnapshot(
-            policy_mode=self.policy_mode,
-            limited_mode_active=self._limited_mode_active,
-            last_valid=self._last_result.valid if self._last_result is not None else None,
-            last_reason=self._last_result.reason if self._last_result is not None else "",
-            last_checked_at_utc=last_checked,
+        return self._snapshot
+
+    def _force_limited_mode(self, active: bool) -> None:
+        """Test helper: force limited_mode_active flag on the snapshot."""
+        self._snapshot = LicenseRuntimeSnapshot(
+            policy_mode=self._snapshot.policy_mode,
+            limited_mode_active=active,
+            last_valid=self._snapshot.last_valid,
+            last_reason=self._snapshot.last_reason,
+            last_checked_at_utc=self._snapshot.last_checked_at_utc,
         )
 
     def is_write_permitted(self, *, method: str, path: str) -> bool:
         """Return whether write operation is permitted under current policy state."""
-        if not self._limited_mode_active:
+        if not self._snapshot.limited_mode_active:
             return True
 
         method_upper = method.upper()
@@ -188,8 +191,9 @@ class LicenseEnforcementController:
     async def _runtime_monitor_loop(self) -> None:
         interval = max(int(self._config.license_check_interval_seconds), 60)
         while True:
-            await self.run_runtime_check_once()
+            # Sleep first: create_app already runs an initial check at startup.
             await asyncio.sleep(interval)
+            await self.run_runtime_check_once()
 
     async def run_runtime_check_once(self) -> None:
         """Execute one runtime validation check and apply policy action."""
@@ -221,9 +225,13 @@ class LicenseEnforcementController:
         result: LicenseValidationResult,
         decision: LicensePolicyDecision,
     ) -> None:
-        self._last_result = result
-        self._last_checked_at = datetime.now(timezone.utc)
-        self._limited_mode_active = bool(decision.limited_mode_active)
+        self._snapshot = LicenseRuntimeSnapshot(
+            policy_mode=self.policy_mode,
+            limited_mode_active=bool(decision.limited_mode_active),
+            last_valid=result.valid,
+            last_reason=result.reason,
+            last_checked_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def _validate_current_license(self) -> LicenseValidationResult:
         token = load_license_token(self._config_dir)

@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tray = ["pystray>=0.19.0", "pillow>=10.0.0"]
+build = ["pyinstaller>=6.0.0,<7.0.0"]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.23.0",

@@ -22,8 +22,16 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
-AGENT_VERSION = "0.2.0"
+try:
+    from importlib.metadata import version as _pkg_version
+
+    AGENT_VERSION = _pkg_version("aems-agent")
+except Exception:
+    AGENT_VERSION = "0.0.0-dev"
 VALID_LICENSE_ENFORCEMENT_MODES = {"warn", "soft-block", "hard-block"}
+
+API_VERSION = "1.0.0"
+MIN_CLIENT_API_VERSION = "1.0.0"
 
 
 def get_config_dir() -> Path:
@@ -35,7 +43,18 @@ def get_config_dir() -> Path:
             return Path(appdata) / "AEMS" / "agent"
         return Path.home() / "AppData" / "Roaming" / "AEMS" / "agent"
     elif system == "Darwin":
-        return Path.home() / ".config" / "aems" / "agent"
+        new_path = Path.home() / "Library" / "Application Support" / "AEMS" / "agent"
+        old_path = Path.home() / ".config" / "aems" / "agent"
+        if old_path.exists() and not new_path.exists():
+            import shutil
+
+            try:
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(str(old_path), str(new_path))
+                logger.info("Migrated config from %s to %s", old_path, new_path)
+            except (OSError, shutil.Error) as e:
+                logger.warning("Config migration failed: %s", e)
+        return new_path
     else:
         xdg_config = os.environ.get("XDG_CONFIG_HOME")
         if xdg_config:
@@ -152,6 +171,10 @@ def save_config(config: AgentConfig, config_dir: Optional[Path] = None) -> None:
         json.dumps(config.model_dump(mode="json"), indent=2),
         encoding="utf-8",
     )
+    try:
+        config_file.chmod(0o600)
+    except OSError:
+        pass  # Best-effort; Windows ACLs handled differently
 
 
 def ensure_auth_token(config_dir: Optional[Path] = None) -> str:

@@ -31,8 +31,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller
-          pip install -e ".[dev]"
+          pip install -e ".[dev,build]"
 
       - name: Install NSIS
         run: choco install nsis -y
@@ -73,6 +72,12 @@ jobs:
           & $signtool sign /fd SHA256 /f $pfxPath /p $env:WIN_CODESIGN_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 dist\aems-agent-setup.exe
           & $signtool verify /pa /v dist\aems-agent-setup.exe
 
+      - name: Clean up signing certificate
+        if: always()
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          if (Test-Path $pfxPath) { Remove-Item -Force $pfxPath }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -100,8 +105,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller
-          pip install -e ".[dev]"
+          pip install -e ".[dev,build]"
 
       - name: Build with PyInstaller
         run: python packaging/build.py --platform macos
@@ -185,8 +189,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller
-          pip install -e ".[dev]"
+          pip install -e ".[dev,build]"
 
       - name: Build with PyInstaller
         run: python packaging/build.py --platform linux
@@ -263,9 +266,11 @@ jobs:
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_FILES: ${{ steps.signed_assets.outputs.files }}
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
+          # shellcheck disable=SC2086
           gh release create "v${VERSION}" \
             --title "AEMS Agent v${VERSION}" \
             --notes "AEMS Local Bridge Agent v${VERSION} - Windows (.exe), macOS (.dmg), Linux (.tar.gz), plus signed manifest/checksums." \
-            ${{ steps.signed_assets.outputs.files }}
+            ${RELEASE_FILES}

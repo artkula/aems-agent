@@ -7,6 +7,20 @@ from typing import Generator
 from aems_agent.config import AgentConfig, save_config, ensure_auth_token
 
 
+@pytest.fixture(autouse=True)
+def _reset_route_state() -> Generator:
+    """Reset module-level pairing state and rate limiters between tests."""
+    from aems_agent import routes
+
+    routes._pairing_challenge = None
+    routes._rate_limiter.reset()
+    routes._pairing_rate_limiter.reset()
+    yield
+    routes._pairing_challenge = None
+    routes._rate_limiter.reset()
+    routes._pairing_rate_limiter.reset()
+
+
 @pytest.fixture
 def tmp_storage_path(tmp_path: Path) -> Path:
     """Create a temporary storage directory."""
@@ -47,7 +61,6 @@ def agent_token(agent_config_dir: Path) -> str:
 def agent_client(agent_config_dir: Path, agent_token: str) -> Generator:
     """Create a FastAPI TestClient for the agent."""
     try:
-        from httpx import ASGITransport, AsyncClient
         from fastapi.testclient import TestClient
     except ImportError:
         pytest.skip("httpx/fastapi not installed (install with: pip install aems-agent)")
