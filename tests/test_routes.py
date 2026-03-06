@@ -994,6 +994,53 @@ class TestUploadSizeLimit:
 # ---------------------------------------------------------------------------
 
 
+class TestHealthLicenseJwt:
+    """Tests for license_jwt field in /health response."""
+
+    def test_health_includes_license_jwt(
+        self,
+        agent_client: Any,
+        auth_headers: dict,
+        agent_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _skip_if_no_fastapi()
+        # Write a fake license.jwt into the config dir
+        license_file = agent_config_dir / "license.jwt"
+        license_file.write_text("fake.jwt.token", encoding="utf-8")
+
+        from aems_agent import config as config_mod
+
+        monkeypatch.setattr(config_mod, "get_config_dir", lambda: agent_config_dir)
+
+        resp = agent_client.get("/health", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["license_jwt"] == "fake.jwt.token"
+
+    def test_health_license_jwt_null_when_missing(
+        self,
+        agent_client: Any,
+        auth_headers: dict,
+        agent_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _skip_if_no_fastapi()
+        # Ensure no license.jwt exists
+        license_file = agent_config_dir / "license.jwt"
+        if license_file.exists():
+            license_file.unlink()
+
+        from aems_agent import config as config_mod
+
+        monkeypatch.setattr(config_mod, "get_config_dir", lambda: agent_config_dir)
+
+        resp = agent_client.get("/health", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["license_jwt"] is None
+
+
 class TestStatusExactFields:
     """Tests for exact field set in /status response."""
 

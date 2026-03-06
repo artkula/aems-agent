@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
-from .config import AGENT_VERSION, API_VERSION, MIN_CLIENT_API_VERSION, AgentConfig, load_config, save_config
+from .config import AGENT_VERSION, API_VERSION, MIN_CLIENT_API_VERSION, AgentConfig, load_config, load_license_token, save_config
 from .security import RateLimiter, validate_path_within_storage
 
 logger = logging.getLogger(__name__)
@@ -245,6 +245,8 @@ async def health(
                 result["disk_used_bytes"] = usage.used
             except OSError:
                 pass
+
+    result["license_jwt"] = load_license_token()
 
     controller = getattr(request.app.state, "license_controller", None)
     if controller is not None:
