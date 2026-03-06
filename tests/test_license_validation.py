@@ -38,7 +38,7 @@ class _FakeAsyncClient:
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         return None
 
-    async def get(self, url: str) -> _FakeResponse:
+    async def get(self, url: str, **kwargs: Any) -> _FakeResponse:
         if url not in self._responses:
             raise RuntimeError(f"unexpected url {url}")
         return self._responses[url]
@@ -217,7 +217,7 @@ class _FakeAsyncClientFetchFails:
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         return None
 
-    async def get(self, url: str) -> _FakeResponse:
+    async def get(self, url: str, **kwargs: Any) -> _FakeResponse:
         raise RuntimeError("network down")
 
 

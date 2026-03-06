@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from jwt import exceptions as jwt_exceptions
 
 from .config import get_config_dir
+from .device_id import get_device_id
 
 
 @dataclass(frozen=True)
@@ -176,7 +177,7 @@ async def _run_heartbeat_logic(
 
     status_url = urljoin(_normalize_base_url(license_service_url), f"/api/licenses/{jti}/status")
     try:
-        status_resp = await client.get(status_url)
+        status_resp = await client.get(status_url, params={"device_id": get_device_id()})
     except Exception:
         return _heartbeat_failure_result(
             now_ts=now_ts,
